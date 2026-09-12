@@ -1,440 +1,294 @@
-"""
-HybridSight Agent
+"""HybridSight agent: routes questions to RAG, web, Wikipedia, and vision."""
 
-Architecture:
-
-User Question
-      ↓
-Planner LLM
-      ↓
-Select required tools
-      ↓
-Execute tools
-      ↓
-Final LLM synthesis
-
-Supported tools:
-- PDF / RAG
-- Vision
-- DuckDuckGo
-- Wikipedia
-"""
-
-from typing import Literal
-
-from pydantic import BaseModel, Field
+import re
+import urllib.parse
+import urllib.request
+import json
 
 from langchain_core.tools import tool
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_community.tools import WikipediaQueryRun
-from langchain_community.utilities import WikipediaAPIWrapper
 
 from config import get_llm
 from tools_rag import search_documents
 from tools_vision import describe_image
 
 
-# =========================================================
-# MODELS
-# =========================================================
-
 llm = get_llm()
-
-
-# =========================================================
-# RAW TOOLS
-# =========================================================
-
 duckduckgo = DuckDuckGoSearchRun()
 
-wikipedia = WikipediaQueryRun(
-    api_wrapper=WikipediaAPIWrapper()
-)
-
-
-# =========================================================
-# SAFE WEB TOOL
-# =========================================================
 
 @tool
 def web_search(query: str) -> str:
-    """
-    Search the live web for current or recent information.
-
-    Use this for:
-    - latest information
-    - current events
-    - recent news
-    - information that changes over time
-    """
-
+    """Search the live web for current or recent information."""
     try:
         result = duckduckgo.invoke(query)
-
         if not result:
             return "No useful web results found."
-
         return str(result)
-
     except Exception as e:
         return f"Web search failed: {e}"
 
 
-# =========================================================
-# SAFE WIKIPEDIA TOOL
-# =========================================================
-
 @tool
 def wikipedia_search(query: str) -> str:
-    """
-    Search Wikipedia for general encyclopedic knowledge.
-
-    Use this for:
-    - concepts
-    - technologies
-    - history
-    - people
-    - places
-    """
-
+    """Search Wikipedia for general encyclopedic knowledge."""
     try:
-        result = wikipedia.invoke(query)
+        encoded = urllib.parse.quote(query)
+        search_url = (
+            "https://en.wikipedia.org/w/api.php"
+            "?action=query&list=search&format=json&utf8=1"
+            "&srlimit=3&srsearch=" + encoded
+        )
+        request = urllib.request.Request(
+            search_url,
+            headers={"User-Agent": "HybridSight/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
 
-        if not result:
-            return "No useful Wikipedia results found."
+        hits = data.get("query", {}).get("search", [])
+        if not hits:
+            return f"No useful Wikipedia results found for: {query}"
 
-        return str(result)
+        title = hits[0].get("title", query)
+        title_encoded = urllib.parse.quote(title)
+        article_url = (
+            "https://en.wikipedia.org/w/api.php"
+            "?action=query&prop=extracts&exintro=1"
+            "&explaintext=1&format=json&redirects=1"
+            "&titles=" + title_encoded
+        )
+        request = urllib.request.Request(
+            article_url,
+            headers={"User-Agent": "HybridSight/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            article_data = json.loads(response.read().decode("utf-8"))
+
+        pages = article_data.get("query", {}).get("pages", {})
+        if not pages:
+            return f"Wikipedia found '{title}', but could not retrieve its content."
+
+        page = next(iter(pages.values()))
+        extract = page.get("extract", "").strip()
+        if not extract:
+            return f"Wikipedia found '{title}', but no article summary was available."
+
+        return f"Wikipedia article: {title}\n\n{extract}"
 
     except Exception as e:
         return f"Wikipedia search failed: {e}"
 
 
-# =========================================================
-# PLANNER SCHEMA
-# =========================================================
-
-class ToolTask(BaseModel):
-
-    tool: Literal[
-        "search_documents",
-        "describe_image",
-        "web_search",
-        "wikipedia_search",
-    ] = Field(
-        description="The tool required for this task."
-    )
-
-    query: str = Field(
-        description=(
-            "The specific sub-question or query that "
-            "should be sent to the selected tool."
-        )
-    )
+def is_document_question(question: str) -> bool:
+    q = question.lower().strip()
+    patterns = [
+        "my pdf", "my document", "my file",
+        "the pdf", "the document", "the uploaded pdf",
+        "the uploaded document", "the uploaded file",
+        "uploaded pdf", "uploaded document", "uploaded file",
+        "according to my pdf", "according to the pdf",
+        "according to my document", "according to the document",
+        "in my pdf", "in the pdf", "in my document", "in the document",
+        "from my pdf", "from the pdf", "from my document", "from the document",
+        "pdf content", "pdf contents", "document content", "document contents",
+        "what does my pdf say", "what does the pdf say",
+        "what does my document say", "what does the document say",
+        "summarize my pdf", "summarise my pdf", "summarize the pdf", "summarise the pdf",
+        "summarize my document", "summarise my document",
+        "summarize the document", "summarise the document",
+    ]
+    return any(p in q for p in patterns)
 
 
-class ToolPlan(BaseModel):
-
-    tasks: list[ToolTask] = Field(
-        description=(
-            "List of tool tasks required to answer "
-            "the user's question. Include multiple "
-            "tasks when multiple sources are needed."
-        )
-    )
-
-
-# =========================================================
-# PLANNER
-# =========================================================
-
-planner = llm.with_structured_output(ToolPlan)
+def is_image_question(question: str) -> bool:
+    q = question.lower().strip()
+    patterns = [
+        "this image", "the image", "uploaded image", "in this image", "in the image",
+        "what is shown", "what can you see", "what do you see",
+        "describe this image", "describe the image",
+        "analyze this image", "analyse this image",
+        "analyze the image", "analyse the image",
+        "objects in the image", "objects are visible",
+        "read this image", "read the image",
+    ]
+    return any(p in q for p in patterns)
 
 
-def create_plan(
-    question: str,
-    pdf_available: bool,
-    image_available: bool,
-) -> ToolPlan:
+def is_current_question(question: str) -> bool:
+    q = question.lower().strip()
+    patterns = [
+        "latest", "current", "currently", "recent", "today", "tonight",
+        "this week", "this month", "breaking news", "current news", "recent news",
+        "latest news", "recent developments", "latest developments",
+        "what happened", "right now", "as of now",
+    ]
+    return any(p in q for p in patterns)
 
-    planner_prompt = f"""
-You are the planning component of HybridSight.
 
-Your job is to understand the user's question and
-decide which information sources are required.
+def llm_route(question: str) -> str:
+    prompt = f"""
+Classify this HybridSight question into exactly one route.
+Return ONLY one word: PDF, VISION, WEB, WIKIPEDIA, or MULTI.
 
-AVAILABLE SOURCES:
+PDF = explicitly about the user's uploaded PDF/document/file.
+VISION = explicitly about an uploaded image.
+WEB = current/latest/recent/today/breaking/changing information.
+WIKIPEDIA = general knowledge, people, biographies, history, science,
+technology, places, concepts, and encyclopedic facts.
+MULTI = genuinely requires both uploaded PDF and image.
 
-PDF/document available:
-{pdf_available}
+Important: an available PDF does NOT make a general question a PDF question.
+"Who was Homi J. Bhabha?" = WIKIPEDIA.
+"What does my PDF say about source coding?" = PDF.
 
-Image available:
-{image_available}
-
-AVAILABLE TOOLS:
-
-1. search_documents
-   Searches the user's uploaded PDF/document.
-
-2. describe_image
-   Analyzes the uploaded image.
-
-3. web_search
-   Searches the live internet for current/recent information.
-
-4. wikipedia_search
-   Searches Wikipedia for general encyclopedic knowledge.
-
-IMPORTANT RULES:
-
-- Understand the meaning of the user's question.
-- Do NOT use keyword matching.
-- Break a complex question into separate information needs.
-- A question can require multiple tools.
-- If PDF and image information are both required,
-  create BOTH tasks.
-- If current information is required, use web_search.
-- Use wikipedia_search for general encyclopedic knowledge.
-- Do not select tools that are unnecessary.
-- If a source is unavailable, do not select its tool.
-- Queries should be focused sub-questions that help answer
-  the original question.
-
-USER QUESTION:
-
-{question}
+Question: {question}
 """
-
     try:
-
-        plan = planner.invoke(planner_prompt)
-
-        return plan
-
+        response = llm.invoke(prompt)
+        text = str(response.content).upper().strip()
+        for route in ("MULTI", "WIKIPEDIA", "VISION", "WEB", "PDF"):
+            if re.search(rf"\b{route}\b", text):
+                return route
     except Exception as e:
-
-        print("Planner error:", e)
-
-        return ToolPlan(tasks=[])
+        print(f"LLM router error: {e}")
+    return "NONE"
 
 
-# =========================================================
-# TOOL EXECUTION
-# =========================================================
+def route_question(question: str, pdf_available: bool, image_available: bool) -> str:
+    # Explicit user-source intent always wins.
+    if is_document_question(question):
+        return "PDF" if pdf_available else "NONE"
 
-def execute_task(
-    task: ToolTask,
-    image_path: str | None = None,
-) -> str:
+    if is_image_question(question):
+        return "VISION" if image_available else "NONE"
 
-    try:
+    # Current information always goes to live web search.
+    if is_current_question(question):
+        return "WEB"
 
-        # ---------------------------------------------
-        # PDF
-        # ---------------------------------------------
+    route = llm_route(question)
 
-        if task.tool == "search_documents":
+    if route == "PDF":
+        return "PDF" if pdf_available else "NONE"
+    if route == "VISION":
+        return "VISION" if image_available else "NONE"
+    if route == "MULTI":
+        if pdf_available and image_available:
+            return "MULTI"
+        if pdf_available:
+            return "PDF"
+        if image_available:
+            return "VISION"
+        return "NONE"
+    if route == "WEB":
+        return "WEB"
+    if route == "WIKIPEDIA":
+        return "WIKIPEDIA"
 
-            return search_documents.invoke(
-                {
-                    "query": task.query
-                }
-            )
-
-        # ---------------------------------------------
-        # IMAGE
-        # ---------------------------------------------
-
-        if task.tool == "describe_image":
-
-            if not image_path:
-
-                return (
-                    "No image is available for "
-                    "vision analysis."
-                )
-
-            return describe_image.invoke(
-                {
-                    "image_path": image_path,
-                    "question": task.query,
-                }
-            )
-
-        # ---------------------------------------------
-        # WEB
-        # ---------------------------------------------
-
-        if task.tool == "web_search":
-
-            return web_search.invoke(
-                {
-                    "query": task.query
-                }
-            )
-
-        # ---------------------------------------------
-        # WIKIPEDIA
-        # ---------------------------------------------
-
-        if task.tool == "wikipedia_search":
-
-            return wikipedia_search.invoke(
-                {
-                    "query": task.query
-                }
-            )
-
-        return "Unknown tool requested."
-
-    except Exception as e:
-
-        return (
-            f"Tool '{task.tool}' failed: {e}"
-        )
+    # Safe default for ordinary non-current questions.
+    return "WIKIPEDIA"
 
 
-# =========================================================
-# FINAL SYNTHESIS
-# =========================================================
+def execute_route(route: str, question: str, image_path: str | None) -> list[tuple[str, str]]:
+    results: list[tuple[str, str]] = []
 
-def synthesize_answer(
-    question: str,
-    tool_results: list[tuple[str, str]],
-) -> str:
+    if route == "PDF":
+        results.append(("search_documents", str(search_documents.invoke({"query": question}))))
+        return results
 
+    if route == "VISION":
+        if not image_path:
+            return [("describe_image", "No image is currently available.")]
+        results.append(("describe_image", str(describe_image.invoke({
+            "image_path": image_path,
+            "question": question,
+        }))))
+        return results
+
+    if route == "WEB":
+        results.append(("web_search", str(web_search.invoke({"query": question}))))
+        return results
+
+    if route == "WIKIPEDIA":
+        results.append(("wikipedia_search", str(wikipedia_search.invoke({"query": question}))))
+        return results
+
+    if route == "MULTI":
+        if image_path:
+            results.append(("describe_image", str(describe_image.invoke({
+                "image_path": image_path,
+                "question": question,
+            }))))
+        results.append(("search_documents", str(search_documents.invoke({"query": question}))))
+        return results
+
+    return results
+
+
+def synthesize_answer(question: str, tool_results: list[tuple[str, str]]) -> str:
     if not tool_results:
+        return "I could not retrieve information from a suitable source."
 
-        return (
-            "I could not identify a suitable information "
-            "source to answer this question."
-        )
-
-    formatted_results = []
-
+    formatted = []
     for tool_name, result in tool_results:
-
-        # Prevent unnecessarily huge context
         result = str(result)
-
         if len(result) > 5000:
             result = result[:5000] + "\n[Result truncated]"
+        formatted.append(f"SOURCE: {tool_name}\n\n{result}")
 
-        formatted_results.append(
-            f"""
-SOURCE: {tool_name}
-
-{result}
-"""
-        )
-
-    combined_sources = "\n".join(
-        formatted_results
-    )
-
-    synthesis_prompt = f"""
-You are HybridSight's final answer generator.
+    prompt = f"""
+Answer the user's question using the retrieved source information below.
+Do not invent facts. Do not claim a source that was not used.
+If the source says no information was found, state that honestly.
 
 USER QUESTION:
-
 {question}
 
-INFORMATION RETRIEVED FROM TOOLS:
-
-{combined_sources}
-
-TASK:
-
-Answer the user's original question using the
-retrieved information.
-
-IMPORTANT:
-
-1. Combine information from ALL relevant sources.
-2. Do not ignore a source just because another source
-   contains more information.
-3. If the question requires comparison, explicitly compare
-   the relevant sources.
-4. Do not invent information.
-5. If the sources disagree, clearly mention the disagreement.
-6. If information is missing, say that it is unavailable.
-7. Give a clear, direct final answer.
-8. Do not describe your internal reasoning.
+RETRIEVED SOURCES:
+{chr(10).join(formatted)}
 """
 
     try:
-
-        response = llm.invoke(
-            synthesis_prompt
-        )
-
+        response = llm.invoke(prompt)
         return response.content
-
     except Exception as e:
-
-        return (
-            f"Final answer generation failed: {e}"
-        )
+        return f"Final answer generation failed: {e}"
 
 
-# =========================================================
-# MAIN HYBRID AGENT
-# =========================================================
-
-def run_hybrid_agent(
-    question: str,
-    pdf_available: bool = False,
-    image_path: str | None = None,
-) -> str:
-
+def run_hybrid_agent(question: str, pdf_available: bool = False, image_path: str | None = None) -> str:
     image_available = image_path is not None
 
-    # -----------------------------------------------------
-    # 1. PLAN
-    # -----------------------------------------------------
-
-    plan = create_plan(
+    route = route_question(
         question=question,
         pdf_available=pdf_available,
         image_available=image_available,
     )
 
     print("\n==============================")
-    print("HYBRIDSIGHT PLAN")
+    print("HYBRIDSIGHT ROUTE")
     print("==============================")
+    print(f"Route           : {route}")
+    print(f"PDF available   : {pdf_available}")
+    print(f"Image available : {image_available}")
 
-    for task in plan.tasks:
+    if route == "NONE":
+        if is_document_question(question):
+            return "📄 No PDF is currently available. Please upload and index a PDF first."
+        if is_image_question(question):
+            return "🖼️ No image is currently available. Please upload an image first."
+        return "I could not identify a suitable information source."
 
-        print(
-            f"- {task.tool}: {task.query}"
-        )
-
-    # -----------------------------------------------------
-    # 2. EXECUTE
-    # -----------------------------------------------------
-
-    tool_results = []
-
-    for task in plan.tasks:
-
-        result = execute_task(
-            task=task,
-            image_path=image_path,
-        )
-
-        tool_results.append(
-            (
-                task.tool,
-                result,
-            )
-        )
-
-    # -----------------------------------------------------
-    # 3. SYNTHESIZE
-    # -----------------------------------------------------
-
-    final_answer = synthesize_answer(
+    tool_results = execute_route(
+        route=route,
         question=question,
-        tool_results=tool_results,
+        image_path=image_path,
     )
 
-    return final_answer
+    print("\n==============================")
+    print("TOOLS EXECUTED")
+    print("==============================")
+    for tool_name, _ in tool_results:
+        print(f"- {tool_name}")
+
+    return synthesize_answer(question, tool_results)

@@ -8,6 +8,7 @@ and indexing documents into ChromaDB.
 # ======================================================
 
 import os
+import gradio as gr
 
 # ======================================================
 # Third-Party Imports
@@ -165,48 +166,146 @@ def create_vectorstore(chunks: list):
 # Main Indexing Function
 # ======================================================
 
-def index_documents(pdf_paths: list) -> int:
+def index_documents(
+    pdf_paths: list,
+    progress=gr.Progress(),
+) -> int:
     """
-    Complete indexing pipeline.
+    Complete PDF indexing pipeline with Gradio progress.
 
     Steps:
         1. Load PDFs
         2. Split into chunks
         3. Update metadata
         4. Store in ChromaDB
-
-    Args:
-        pdf_paths (list):
-            List of PDF file paths.
-
-    Returns:
-        int:
-            Total number of indexed chunks.
     """
 
     print("\n===================================")
     print("      INDEXING STARTED")
     print("===================================\n")
 
-    # Step 1: Load documents
-    documents = load_documents(pdf_paths)
+
+    # =====================================================
+    # STEP 1 — LOAD PDF
+    # =====================================================
+
+    progress(
+        0.10,
+        desc="📄 Loading PDF..."
+    )
+
+    documents = load_documents(
+        pdf_paths
+    )
+
 
     if not documents:
+
+        progress(
+            1.0,
+            desc="❌ No PDF content could be loaded."
+        )
+
         print("❌ No documents were loaded.")
+
         return 0
 
-    # Step 2: Split documents
-    chunks = split_documents(documents)
 
-    # Step 3: Update metadata
-    chunks = add_metadata(chunks)
+    progress(
+        0.25,
+        desc=f"✅ PDF loaded — {len(documents)} pages"
+    )
 
-    # Step 4: Store in ChromaDB
-    create_vectorstore(chunks)
+
+    # =====================================================
+    # STEP 2 — SPLIT INTO CHUNKS
+    # =====================================================
+
+    progress(
+        0.35,
+        desc="✂️ Splitting document into chunks..."
+    )
+
+    chunks = split_documents(
+        documents
+    )
+
+
+    if not chunks:
+
+        progress(
+            1.0,
+            desc="❌ No chunks were created."
+        )
+
+        print("❌ No chunks were created.")
+
+        return 0
+
+
+    progress(
+        0.50,
+        desc=f"✅ Created {len(chunks)} chunks"
+    )
+
+
+    # =====================================================
+    # STEP 3 — METADATA
+    # =====================================================
+
+    progress(
+        0.60,
+        desc="🏷️ Updating document metadata..."
+    )
+
+    chunks = add_metadata(
+        chunks
+    )
+
+
+    progress(
+        0.70,
+        desc="✅ Metadata updated"
+    )
+
+
+    # =====================================================
+    # STEP 4 — CHROMADB
+    # =====================================================
+
+    progress(
+        0.75,
+        desc="🧠 Generating embeddings and updating ChromaDB..."
+    )
+
+    create_vectorstore(
+        chunks
+    )
+
+
+    progress(
+        0.95,
+        desc="📚 Document index created successfully"
+    )
+
+
+    # =====================================================
+    # COMPLETE
+    # =====================================================
+
+    progress(
+        1.0,
+        desc=f"✅ PDF indexing completed — {len(chunks)} chunks"
+    )
+
 
     print("\n===================================")
     print("      INDEXING COMPLETED")
     print("===================================")
-    print(f"✓ Total Chunks Indexed : {len(chunks)}\n")
+
+    print(
+        f"✓ Total Chunks Indexed : {len(chunks)}\n"
+    )
+
 
     return len(chunks)

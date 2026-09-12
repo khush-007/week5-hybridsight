@@ -5,6 +5,7 @@ Allows the LangGraph agent to search
 the user's uploaded PDF documents.
 """
 
+
 from langchain_core.tools import tool
 from langchain_chroma import Chroma
 
@@ -43,6 +44,38 @@ def has_documents():
 
 
 # ======================================================
+# Clear Indexed PDF Documents
+# ======================================================
+
+def clear_documents():
+    """
+    Remove all currently indexed PDF chunks
+    from ChromaDB.
+    """
+
+    existing_ids = vectorstore.get()["ids"]
+
+    if existing_ids:
+
+        vectorstore.delete(
+            ids=existing_ids
+        )
+
+        print(
+            f"✓ Removed {len(existing_ids)} "
+            f"indexed chunks from ChromaDB."
+        )
+
+    else:
+
+        print(
+            "✓ ChromaDB is already empty."
+        )
+
+    return True
+
+
+# ======================================================
 # RAG Tool
 # ======================================================
 
@@ -70,7 +103,11 @@ def search_documents(query: str) -> str:
     # --------------------------------------------------
 
     if not has_documents():
-        return "No documents uploaded yet."
+
+        return (
+            "No documents are currently uploaded. "
+            "Please upload and index a PDF first."
+        )
 
     # --------------------------------------------------
     # Retrieve relevant chunks
@@ -89,7 +126,11 @@ def search_documents(query: str) -> str:
     # --------------------------------------------------
 
     if not chunks:
-        return "No relevant content found in the uploaded documents."
+
+        return (
+            "No relevant content found "
+            "in the uploaded documents."
+        )
 
     # --------------------------------------------------
     # Return chunks with source and page information

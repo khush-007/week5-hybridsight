@@ -1,8 +1,23 @@
-@"
-venv/
-.env
+# Python
 __pycache__/
-*.pyc
-chroma_store/
-.gradio/
-"@ | Out-File -Encoding utf8 .gitignore
+*.py[cod]
+
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# ChromaDB
+chroma_db/
+
+# Local files
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# OS
+.DS_Store
+Thumbs.db
