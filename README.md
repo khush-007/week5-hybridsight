@@ -8,6 +8,10 @@ The system uses an LLM-based planner to determine which information source or to
 
 ---
 
+## 🚀 Live Demo
+
+👉 **[Try HybridSight Live](https://khush-0007-hybridsight.hf.space)**
+
 ## 🚀 Features
 
 - 📄 **PDF / RAG**
@@ -306,7 +310,8 @@ Planner LLM
 The goal is to allow the LLM to determine the appropriate tool instead of relying on fixed keyword-based routing.
 
 📌 Project Status
-Week 5 — Hybrid Agents
+
+Completed — HybridSight AI Agent
 Capability	Status
 PDF Processing	✅
 RAG	✅
